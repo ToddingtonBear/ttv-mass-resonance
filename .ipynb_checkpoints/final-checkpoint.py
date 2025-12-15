@@ -7,9 +7,9 @@ import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
-from sklearn.metrics import mean_absolute_error, mean_squared_error
 from astropy.timeseries import LombScargle
 from scipy.stats import pearsonr
+import joblib
 
 #-----------------------------------------------------------------------------
 # Script Variables & Physics Constants
@@ -21,25 +21,13 @@ USE_RESONANCES = True
 SOLAR_TO_EARTH = 332946.0
 # Assuming 2*pi in simulation = 365.25 days
 SIM_TIME_TO_DAYS = 365.25 / (2 * np.pi) 
+SIM_TIME_TO_MINUTES = SIM_TIME_TO_DAYS * 24 * 60
 
 #-----------------------------------------------------------------------------
 # Utility Functions
 #-----------------------------------------------------------------------------
 
 def detect_transits(sim, integration_time, dt, max_transits, planet_index):
-    """
-    Detects the times when a specified planet transits the star (crosses the y-axis
-    while in front of the star) within a REBOUND simulation.
-    
-    Inputs:
-        :param sim: the simulation being run
-        :param integration_time: the 'time' the sim is to run for
-        :param dt: the integration time step
-        :param max_transits: max number of transits we want to detect
-        :param planet_index: index of the planet we want to detect transits of
-    Outputs:
-        array of transit times
-    """
     transit_times = []
     star = sim.particles[0]             # star is always the first element in our sim (or should be!)
     planet = sim.particles[planet_index]# specify the index of the planet in our sim whose transits we want to detect
@@ -82,13 +70,9 @@ def detrend_ttv(ttv_data):
 def generate_simulation_data(num_simulations, max_transits):
     """
     Generate the simulation data to train our model
-    Inputs:
-        :param num_simulations: number of simulations to be run
-        :param max_transits: number of transits to reach before terminating a sim
-    Outputs:
-        array of physical features
-        array of masses
-        array of TTVs
+    
+    :param num_simulations: number of simulations to be run
+    :param max_transits: number of transits to reach before terminating a sim
     """
     print(f"Generating {num_simulations} simulations...")
     all_features = []
@@ -96,10 +80,7 @@ def generate_simulation_data(num_simulations, max_transits):
     all_ttvs = []
     
     # Use strong resonances to ensure a learnable signal
-    resonances = [1.5, 2.0, 3.0] 
-    # as an example, a resonance ration of 1.5, or 3/2, would mean planet B's period is 
-    # 1.5 times planet C's, or put another way, by the time planet B has orbited three times,
-    # planet C has orbited only twice
+    resonances = [1.5, 2.0, 3.0] # [1.25, 1.333, 1.5, 2.0, 3.0]# 
     
     for i in range(num_simulations):
         if (i + 1) % 50 == 0: print(f"  Simulation {i+1}...")
@@ -165,7 +146,7 @@ def generate_simulation_data(num_simulations, max_transits):
                 
                 # Feature Construction: [Amplitude, Power Spectrum, Phys Params]
                 amp = np.std(ttv_vec)
-                phys = [P_b, ratio, e_b]    # our physical features of the planets
+                phys = [P_b, ratio, e_b]
                 
                 features = np.hstack(([amp], power, phys)) # stack our features
                 all_features.append(features)
@@ -173,9 +154,7 @@ def generate_simulation_data(num_simulations, max_transits):
                 all_ttvs.append(ttv_vec)
 
 
-        except Exception: 
-            print(f"Exception in simulation {i}. Proceeding to next simulation.")
-            continue
+        except Exception: continue
 
     return np.array(all_features), np.array(all_masses), np.array(all_ttvs)
 
@@ -184,19 +163,13 @@ def generate_simulation_data(num_simulations, max_transits):
 #-----------------------------------------------------------------------------
 
 class MassPredictor(nn.Module):
-    """
-    Neural Network model designed to estimate planetary mass from 
-    TTV amplitudes and periodogram features.
-    Because we're working with normalised data and will have negative values,
-    use LeakyReLU to stop neurons "dying".
-    """
     def __init__(self, input_size):
         super(MassPredictor, self).__init__()
         self.network = nn.Sequential(
-            nn.Linear(input_size, 256), 
-            nn.BatchNorm1d(256),        # Stabilizes training by normalizing layer outputs
-            nn.LeakyReLU(0.1),          # Allows small gradients for negative values to prevent "dead neurons"
-            nn.Dropout(0.1),            # Randomly zeros 10% of neurons to prevent overfitting to specific noise
+            nn.Linear(input_size, 256),
+            nn.BatchNorm1d(256),
+            nn.LeakyReLU(0.1),
+            nn.Dropout(0.1),
             
             nn.Linear(256, 128),
             nn.BatchNorm1d(128),
@@ -214,66 +187,49 @@ class MassPredictor(nn.Module):
 
 def train_model(model, X_train, y_train, X_val, y_val, epochs=200, batch_size=16):           
     print("\nStarting model training...")
-    # --- Data Preparation ---
-    # Convert NumPy arrays to PyTorch Tensors (the required data format for the model)
     X_train_t = torch.tensor(X_train, dtype=torch.float32)
-    # .view(-1, 1) ensures the target labels have the correct shape for the loss function
     y_train_t = torch.tensor(y_train, dtype=torch.float32).view(-1, 1)
     X_val_t = torch.tensor(X_val, dtype=torch.float32)
     y_val_t = torch.tensor(y_val, dtype=torch.float32).view(-1, 1)
 
-    # HuberLoss is robust to outliers, combining Mean Squared Error and Mean Absolute Error
     criterion = nn.HuberLoss()                                                                            
-    # Adam optimizer handles weight updates; weight_decay adds L2 regularization to prevent overfitting
     optimizer = optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-3) 
-    # Scheduler reduces the learning rate when the validation loss plateaus to fine-tune results
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, 'min', patience=5)
 
-    # --- Early Stopping Setup ---
     best_val_loss, patience_counter, max_patience = float('inf'), 0, 30
     best_model_state = None
 
     for epoch in range(epochs):
-        # 1. Training Phase
-        model.train() # Set model to training mode (enables Dropout/BatchNorm)
+        model.train()
         train_loss = 0
-        indices = torch.randperm(len(X_train_t)) # Shuffle data every epoch to improve generalization. Prevents learning order.
-        
-        # Mini-batch loop
+        indices = torch.randperm(len(X_train_t)) # PREVENTS LEARNING ANY KIND OF ORDER
         for i in range(0, len(X_train_t), batch_size):
             batch_indices = indices[i:i+batch_size]
             batch_X, batch_y = X_train_t[batch_indices], y_train_t[batch_indices]
-            # Forward pass: Compute predicted outputs by passing inputs to the model
             outputs = model(batch_X)
             loss = criterion(outputs, batch_y)
-            # Backward pass and optimization
-            optimizer.zero_grad()   # Clear previous gradients
-            loss.backward()         # Compute gradients using backpropagation
-            optimizer.step()        # Update model weights
+            optimizer.zero_grad()
+            loss.backward() # Backpropagation uses calculus chain rule
+            optimizer.step() # Weights update
             train_loss += loss.item()
         
-        # 2. Validation Phase
-        model.eval() # Set model to evaluation mode (disables Dropout/BatchNorm)
-        with torch.no_grad():   # Disable gradient calculation to save memory and time
+        model.eval()
+        with torch.no_grad():
             val_loss = criterion(model(X_val_t), y_val_t)
         
-        scheduler.step(val_loss) # Update learning rate based on validation performance
+        scheduler.step(val_loss)
         if (epoch + 1) % 10 == 0:
             print(f'Epoch [{epoch+1}/{epochs}], Val Loss: {val_loss.item():.6f}')
         
-        # --- Early Stopping Logic ---
-        # If model improves, save the current best weights
         if val_loss < best_val_loss:
             best_val_loss, patience_counter = val_loss, 0
             best_model_state = model.state_dict().copy()
         else:
-            # If no improvement, increment counter; stop training if max_patience reached
             patience_counter += 1
             if patience_counter >= max_patience:
                 print(f"Early stopping at epoch {epoch+1}")
                 break
     
-    # Reload the best performing weights before returning the model
     if best_model_state:
         model.load_state_dict(best_model_state)
     return model
@@ -292,7 +248,7 @@ if __name__ == "__main__":
     scaler_X = StandardScaler()
     X_scaled = scaler_X.fit_transform(X_raw)
     
-    # Data Splitting: Train (64%), Validation (16%), Test (20%)
+    # Data Splitting: Train (64%), Val (16%), Test (20%)
     X_temp, X_test, y_temp, y_test = train_test_split(X_scaled, y_log, test_size=0.2, random_state=42)
     X_train, X_val, y_train, y_val = train_test_split(X_temp, y_temp, test_size=0.2, random_state=42)
     
@@ -337,13 +293,14 @@ if __name__ == "__main__":
 
 
 
-    # --- ERROR ANALYSIS ---
-
-    # Plot 1: Percentage Residuals vs Actual Mass
+    # --- ERROR ANALYSIS (Percentage Units) ---
     # This calculates how many percent the prediction was away from the true value
     # A value of 20 means "Predicted 20% more than truth", -10 means "10% less than truth"
     residuals_percentage = (10**(test_preds - y_test) - 1) * 100
+
     plt.figure(figsize=(12, 5))
+
+    # Plot 1: Percentage Residuals vs Actual Mass
     plt.subplot(1, 2, 1)
     plt.scatter(y_test_earth, residuals_percentage, alpha=0.5, color='purple')
     plt.axhline(0, color='black', linestyle='--')
@@ -352,11 +309,7 @@ if __name__ == "__main__":
     plt.ylabel("Prediction Error (%)")
     plt.title("Percentage Error vs Actual Mass")
 
-    # Plot 2: Error Distribution Histogram (%)
-    # This plot assesses model bias and variance. A "perfect" model would result in 
-    # a narrow spike centered exactly at the red line (0%). A distribution shifted 
-    # to the right indicates consistent overestimation, while a wide distribution 
-    # indicates high variance (low precision) in the mass predictions.
+    # Plot 2: Error Distribution (%)
     plt.subplot(1, 2, 2)
     plt.hist(residuals_percentage, bins=25, color='gray', edgecolor='black', alpha=0.7)
     plt.axvline(0, color='red', linestyle='--')
@@ -367,25 +320,17 @@ if __name__ == "__main__":
     plt.show()
 
 
-    # --- Plot: Error vs. Period Ratio ---
-    # This plot tests the fundamental TTV theory: predictions should be most accurate 
-    # (lowest absolute error) when the period ratio is near a strong mean-motion resonance 
-    # (e.g., 1.5 for 3:2, or 2.0 for 2:1). The color scale shows that high-mass systems 
-    # (where TTV signal is strongest) are distributed across the error landscape.
-    
-    # Re-establishing the link between the separated test labels (y_test) and the original 
-    # physical parameters (X_raw, specifically the Period Ratio at index -2).
+    # Get the indices of the test set from the original data
+    # (Assuming you didn't shuffle indices manually, we can find them via y_test matches)
     test_indices = []
     for val in y_test:
         idx = np.where(y_log == val)[0][0]
         test_indices.append(idx)
 
-    # Extract the period ratio (Pc/Pb) for all data points in the test set.
-    test_ratios = X_raw[test_indices, -2] 
+    test_ratios = X_raw[test_indices, -2]  # 'ratio' was the 2nd to last feature
 
+    # Plot 3: Absolute Percentage Error vs Ratio
     plt.figure(figsize=(8, 5))
-    # Use log normalization (mcolors.LogNorm) on the colorbar to clearly show mass 
-    # differences across orders of magnitude (Earth to Jupiter mass).
     plt.scatter(test_ratios, np.abs(residuals_percentage), c=y_test_earth, cmap='viridis', norm=mcolors.LogNorm())
     plt.colorbar(label='Actual Mass ($M_{Earth}$)')
     plt.xlabel("Period Ratio ($P_c / P_b$)")
@@ -394,25 +339,12 @@ if __name__ == "__main__":
     plt.grid(True, alpha=0.2)
     plt.show()
 
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
 
-    # --- Statistical Performance Summary ---
-
-    # Mean Absolute Error (MAE) represents the average distance between the predicted 
-    # and actual mass in Log10 space (dex). It provides a stable measure of typical error.
     mae = mean_absolute_error(y_test, test_preds)
-
-    # Root Mean Squared Error (RMSE) penalizes larger errors more heavily than MAE. 
-    # A significant gap between RMSE and MAE would suggest the presence of extreme outliers 
-    # where the model's predictions were significantly off.
     rmse = np.sqrt(mean_squared_error(y_test, test_preds))
 
     print(f"\n--- Statistical Error Analysis ---")
     print(f"Mean Absolute Error: {mae:.4f} dex") 
     print(f"Root Mean Squared Error: {rmse:.4f} dex")
-
-    # Physical Interpretation:
-    # Because we trained on Log10 masses, a "dex" error is logarithmic. 
-    # By calculating 10^MAE, we convert the average log-error into a linear scale factor.
-    # For example: an MAE of 0.3 dex indicates a factor of 2.0x error (10^0.3), 
-    # meaning the predicted mass is typically within half or double the true mass.
     print(f"Typical Error: Factor of {10**mae:.2f}x in mass")
