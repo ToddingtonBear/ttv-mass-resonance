@@ -4,17 +4,25 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 import matplotlib.pyplot as plt
+import matplotlib.colors as mcolors
 from sklearn.preprocessing import StandardScaler
 from sklearn.model_selection import train_test_split
 from astropy.timeseries import LombScargle
 from scipy.stats import pearsonr
+import joblib
 
 #-----------------------------------------------------------------------------
-# Script Variables
+# Script Variables & Physics Constants
 #-----------------------------------------------------------------------------
 NUM_SIMULATIONS = 1000
 MAX_TRANSITS = 100
 USE_RESONANCES = True
+
+SOLAR_TO_EARTH = 332946.0
+# Assuming 2*pi in simulation = 365.25 days
+SIM_TIME_TO_DAYS = 365.25 / (2 * np.pi) 
+SIM_TIME_TO_MINUTES = SIM_TIME_TO_DAYS * 24 * 60
+
 #-----------------------------------------------------------------------------
 # Utility Functions
 #-----------------------------------------------------------------------------
@@ -79,7 +87,7 @@ def generate_simulation_data(num_simulations, max_transits):
         
         try:
             # Randomize Planet B
-            m_b = np.random.uniform(1e-5, 1e-4) # mass
+            m_b = np.random.uniform(1e-6, 1e-4) # mass (earth range to jupiter range)
             P_b = np.random.uniform(2*np.pi, 4*np.pi)   # period
             e_b = np.random.uniform(0.0, 0.02)  # eccentricity
             
@@ -254,22 +262,27 @@ if __name__ == "__main__":
         test_preds = model(torch.tensor(X_test, dtype=torch.float32)).numpy().flatten()
     
     # Plotting
-    # 5. Visualize sample TTV signal
+    # Visualize sample TTV signal
     plt.figure(figsize=(10, 6))
-    plt.plot(ttvs[0], 'o-', label='TTV Signal')
-    plt.title(f'Sample TTV Signal (Mass = {y_raw[0]:.6f})')
+    plt.plot(ttvs[0] * SIM_TIME_TO_DAYS, 'o-', label='TTV Signal')
+    plt.title(f'Sample TTV Signal (Mass = {y_raw[0]*SOLAR_TO_EARTH:.2f} Earth Masses)')
     plt.xlabel('Transit Number')
-    plt.ylabel('Time Variation (simulation units)')
+    plt.ylabel('Time Variation (Days)')
     plt.legend()
     plt.grid(True)
     plt.show()
 
     # predicted mass vs actual
     plt.figure(figsize=(8, 5))
-    plt.scatter(y_test, test_preds, alpha=0.6, color='blue', label='Predictions')
-    plt.plot([y_test.min(), y_test.max()], [y_test.min(), y_test.max()], 'r--', label='Perfect Fit')
-    plt.xlabel("Actual Mass (Log10)")
-    plt.ylabel("Predicted Mass (Log10)")
+    # Convert logs back to linear Earth masses
+    y_test_earth = 10**y_test * SOLAR_TO_EARTH
+    preds_earth = 10**test_preds * SOLAR_TO_EARTH
+    plt.scatter(y_test_earth, preds_earth, alpha=0.6, color='blue', label='Predictions')
+    plt.plot([y_test_earth.min(), y_test_earth.max()], [y_test_earth.min(), y_test_earth.max()], 'r--', label='Perfect Fit')
+    plt.xscale('log') # Use log scales to see the full range clearly
+    plt.yscale('log')
+    plt.xlabel("Actual Mass (Earth Masses)")
+    plt.ylabel("Predicted Mass (Earth Masses)")
     plt.title("TTV + Periodogram: Mass Prediction")
     plt.legend()
     plt.grid(alpha=0.3)
@@ -277,3 +290,61 @@ if __name__ == "__main__":
 
     corr, _ = pearsonr(X_raw[:, 0], y_raw)
     print(f"\nAmplitude-to-Mass Correlation: {corr:.4f}")
+
+
+
+    # --- ERROR ANALYSIS (Percentage Units) ---
+    # This calculates how many percent the prediction was away from the true value
+    # A value of 20 means "Predicted 20% more than truth", -10 means "10% less than truth"
+    residuals_percentage = (10**(test_preds - y_test) - 1) * 100
+
+    plt.figure(figsize=(12, 5))
+
+    # Plot 1: Percentage Residuals vs Actual Mass
+    plt.subplot(1, 2, 1)
+    plt.scatter(y_test_earth, residuals_percentage, alpha=0.5, color='purple')
+    plt.axhline(0, color='black', linestyle='--')
+    plt.xscale('log') # Keep x-axis as log Earth masses for clarity
+    plt.xlabel("Actual Mass (Earth Masses)")
+    plt.ylabel("Prediction Error (%)")
+    plt.title("Percentage Error vs Actual Mass")
+
+    # Plot 2: Error Distribution (%)
+    plt.subplot(1, 2, 2)
+    plt.hist(residuals_percentage, bins=25, color='gray', edgecolor='black', alpha=0.7)
+    plt.axvline(0, color='red', linestyle='--')
+    plt.xlabel("Prediction Error (%)")
+    plt.ylabel("Frequency")
+    plt.title("Error Distribution (Percentage)")
+    plt.tight_layout()
+    plt.show()
+
+
+    # Get the indices of the test set from the original data
+    # (Assuming you didn't shuffle indices manually, we can find them via y_test matches)
+    test_indices = []
+    for val in y_test:
+        idx = np.where(y_log == val)[0][0]
+        test_indices.append(idx)
+
+    test_ratios = X_raw[test_indices, -2]  # 'ratio' was the 2nd to last feature
+
+    # Plot 3: Absolute Percentage Error vs Ratio
+    plt.figure(figsize=(8, 5))
+    plt.scatter(test_ratios, np.abs(residuals_percentage), c=y_test_earth, cmap='viridis', norm=mcolors.LogNorm())
+    plt.colorbar(label='Actual Mass ($M_{Earth}$)')
+    plt.xlabel("Period Ratio ($P_c / P_b$)")
+    plt.ylabel("Absolute Error (%)")
+    plt.title("Error vs Period Ratio")
+    plt.grid(True, alpha=0.2)
+    plt.show()
+
+    from sklearn.metrics import mean_absolute_error, mean_squared_error
+
+    mae = mean_absolute_error(y_test, test_preds)
+    rmse = np.sqrt(mean_squared_error(y_test, test_preds))
+
+    print(f"\n--- Statistical Error Analysis ---")
+    print(f"Mean Absolute Error: {mae:.4f} dex") 
+    print(f"Root Mean Squared Error: {rmse:.4f} dex")
+    print(f"Typical Error: Factor of {10**mae:.2f}x in mass")
