@@ -26,7 +26,7 @@ from astropy.timeseries import LombScargle
 #-----------------------------------------------------------------------------
 # Script Variables & Physics Constants
 #-----------------------------------------------------------------------------
-NUM_SIMULATIONS = 10000
+NUM_SIMULATIONS = 1000
 MAX_TRANSITS = 100
 USE_RESONANCES = True    # for period ratio selection
 # if True, select from range of set resonances +/- 0.07
