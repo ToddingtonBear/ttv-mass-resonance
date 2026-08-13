@@ -66,7 +66,7 @@ def detect_transits(sim, integration_time, dt, max_transits, planet_index):
         curr_y = planet.y - star.y
         # if the product of previous and current y is negative, they they are on
         # opposite sides of the y axis, and so there has been a transit of the y-axis
-        # if (planet.x - star.x) > 0, then the planet is in front of the star: transit occured
+        # if (planet.x - star.x) > 0, then the planet is in front of the star: transit occurred
         if prev_y * curr_y < 0 and (planet.x - star.x) > 0:
             # perform linear interpolation to find more precise moment of crossing
             weight = -prev_y / (curr_y - prev_y)
@@ -74,6 +74,7 @@ def detect_transits(sim, integration_time, dt, max_transits, planet_index):
             transit_times.append(precise_time)
         prev_y = curr_y
     return np.array(transit_times)
+
 
 def detrend_ttv(ttv_data):
     """

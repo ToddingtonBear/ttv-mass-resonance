@@ -56,7 +56,7 @@ def detect_transits(sim, integration_time, dt, max_transits, planet_index):
     """
     transit_times = []
     star = sim.particles[0]             # star is always the first element in our sim (or should be!)
-    planet = sim.particles[planet_index]# specify the index of the planet in our sim whose transits we want to detect
+    planet = sim.particles[planet_index]# index of the planet in our sim whose transits we want to detect
     prev_y = planet.y - star.y
 
     time = 0
@@ -64,7 +64,7 @@ def detect_transits(sim, integration_time, dt, max_transits, planet_index):
         sim.integrate(sim.t + dt)           # progress simulation
         time = sim.t                        # get time from sim
         curr_y = planet.y - star.y
-        # if the product of previous and current y is negative, they they are on
+        # if the product of previous and current y is negative, they are on
         # opposite sides of the y axis, and so there has been a transit of the y-axis
         # if (planet.x - star.x) > 0, then the planet is in front of the star: transit occured
         if prev_y * curr_y < 0 and (planet.x - star.x) > 0:
@@ -74,6 +74,7 @@ def detect_transits(sim, integration_time, dt, max_transits, planet_index):
             transit_times.append(precise_time)
         prev_y = curr_y
     return np.array(transit_times)
+
 
 def detrend_ttv(ttv_data):
     """
