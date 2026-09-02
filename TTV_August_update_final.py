@@ -375,7 +375,7 @@ def train_model(model, X_train, y_train, X_val, y_val, epochs=200, batch_size=16
             train_loss += loss.item()
 
         # Calculate average training loss for the epoch
-        avg_train_loss = train_loss / len(X_train_t)
+        avg_train_loss = train_loss / len(X_train_t) # no/ of batchs #len(X_train_t) #
 
         # 2. Validation phase
         model.eval() # Set model to evaluation mode (disables Dropout/BatchNorm)
@@ -544,7 +544,7 @@ if __name__ == "__main__":
         resonances=[1.5, 2.0, 3.0],
         resonance_fraction=0.5,     #50/50 split between resonant and non-resonant systems
         add_noise=True,
-        noise_level=0.01,
+        noise_level=0.001,
         missing_transits=False,
         mass_range=DEFAULT_MASS_RANGE
     )
